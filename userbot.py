@@ -239,3 +239,34 @@ async def get_recent_messages(chat_id: int, limit: int = 35) -> list:
         return []
 
 
+async def delete_deal_group(chat_id: int) -> bool:
+    """Permanently delete / destroy a deal group using the middleman's userbot account.
+    This deletes the group for all participants and completely removes it from the
+    creator account so the middleman's account does not hit Telegram's joined group limits."""
+    if not client or not client.is_connected():
+        log.warning("Userbot client is not connected; cannot delete deal group %s", chat_id)
+        return False
+    try:
+        peer = None
+        try:
+            peer = await client.get_input_entity(chat_id)
+        except Exception:
+            try:
+                entity = await client.get_entity(chat_id)
+                peer = await client.get_input_entity(entity)
+            except Exception as e2:
+                log.warning("Could not resolve input entity for %s: %s", chat_id, e2)
+
+        if not peer:
+            cid_str = str(chat_id)
+            real_id = int(cid_str[4:]) if cid_str.startswith("-100") else abs(int(chat_id))
+            peer = types.InputChannel(channel_id=real_id, access_hash=0)
+
+        await client(functions.channels.DeleteChannelRequest(channel=peer))
+        log.info("Permanently destroyed and deleted deal group %s via userbot", chat_id)
+        return True
+    except Exception as e:
+        log.warning("Could not delete group %s via userbot: %s", chat_id, e)
+        return False
+
+
