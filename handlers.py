@@ -4316,23 +4316,23 @@ async def dlt_cmd(update, ctx):
         return
 
     text = (
-        "🧹 <b>Destroy Closed Groups (/dlt)</b>\n\n"
+        "🧹 <b>Clean Closed Groups (/dlt)</b>\n\n"
         f"Found <b>{count}</b> closed deal group(s) waiting for cleanup.\n\n"
-        "Destroying a group will:\n"
+        "Cleaning up a group will:\n"
         "• Permanently delete the group for all participants\n"
-        "• Delete from the middleman's account (frees group limits)\n"
+        "• Remove from middleman's account (frees group limits)\n"
         "• Revoke all active invite links\n"
         "• Mark deal record as cleaned in database\n\n"
-        "Select batch size to destroy/clean:"
+        "Select batch size to clean:"
     )
     kb = InlineKeyboardMarkup([
         [
-            _btn("💥 Destroy 10", "dlt:batch:10", BLUE),
-            _btn("💥 Destroy 20", "dlt:batch:20", BLUE),
+            _btn("🧹 Clean 10", "dlt:batch:10", BLUE),
+            _btn("🧹 Clean 20", "dlt:batch:20", BLUE),
         ],
         [
-            _btn("💥 Destroy 50", "dlt:batch:50", BLUE),
-            _btn(f"🔥 Destroy All ({count})", "dlt:batch:all", GREEN),
+            _btn("🧹 Clean 50", "dlt:batch:50", BLUE),
+            _btn(f"🧹 Clean All ({count})", "dlt:batch:all", GREEN),
         ],
         [
             _btn("❌ Cancel", "dlt:cancel", RED),
@@ -4368,18 +4368,18 @@ async def dlt_callback(update, ctx):
             return
 
         text = (
-            "🧹 <b>Destroy Closed Groups (/dlt)</b>\n\n"
+            "🧹 <b>Clean Closed Groups (/dlt)</b>\n\n"
             f"Found <b>{count}</b> closed deal group(s) waiting for cleanup.\n\n"
-            "Select batch size to destroy:"
+            "Select batch size to clean:"
         )
         kb = InlineKeyboardMarkup([
             [
-                _btn("💥 Destroy 10", "dlt:batch:10", BLUE),
-                _btn("💥 Destroy 20", "dlt:batch:20", BLUE),
+                _btn("🧹 Clean 10", "dlt:batch:10", BLUE),
+                _btn("🧹 Clean 20", "dlt:batch:20", BLUE),
             ],
             [
-                _btn("💥 Destroy 50", "dlt:batch:50", BLUE),
-                _btn(f"🔥 Destroy All ({count})", "dlt:batch:all", GREEN),
+                _btn("🧹 Clean 50", "dlt:batch:50", BLUE),
+                _btn(f"🧹 Clean All ({count})", "dlt:batch:all", GREEN),
             ],
             [
                 _btn("❌ Cancel", "dlt:cancel", RED),
@@ -4405,7 +4405,7 @@ async def _start_cleanup(bot, owner_id: int, msg, limit: Optional[int], edit_msg
             await msg.reply_text("⚠️ A cleanup task is already running. Please wait for it to complete.")
         return
 
-    status_text = "⏳ <b>Starting deal group destruction & cleanup batch...</b>"
+    status_text = "⏳ <b>Starting cleanup batch...</b>"
     if edit_msg:
         status_msg = await msg.edit_text(status_text, parse_mode=HTML)
     else:
@@ -4495,8 +4495,8 @@ async def execute_cleanup(bot, owner_id: int, limit: Optional[int], status_msg=N
         if status_msg and (now_time - last_update_time > 2.5 or idx == total):
             try:
                 await status_msg.edit_text(
-                    f"🧹 <b>Destroying Closed Deal Groups...</b>\n"
-                    f"Processed: <b>{idx}/{total}</b> | Destroyed: <b>{success_cnt}</b> | Skipped: <b>{skipped_cnt}</b>",
+                    f"🧹 <b>Cleaning Closed Deal Groups...</b>\n"
+                    f"Processed: <b>{idx}/{total}</b> | Cleaned: <b>{success_cnt}</b> | Skipped: <b>{skipped_cnt}</b>",
                     parse_mode=HTML,
                 )
                 last_update_time = now_time
@@ -4509,8 +4509,8 @@ async def execute_cleanup(bot, owner_id: int, limit: Optional[int], status_msg=N
 
     summary_text = (
         "✅ <b>Cleanup Complete</b>\n\n"
-        f"• <b>Groups Destroyed & Cleaned:</b> {success_cnt}\n"
-        f"• <b>Already Destroyed / Skipped:</b> {skipped_cnt}\n"
+        f"• <b>Groups Cleaned & Deleted:</b> {success_cnt}\n"
+        f"• <b>Already Cleaned / Skipped:</b> {skipped_cnt}\n"
         f"• <b>Remaining Closed Groups:</b> {remaining_cnt}\n"
     )
 
@@ -4518,7 +4518,7 @@ async def execute_cleanup(bot, owner_id: int, limit: Optional[int], status_msg=N
     if remaining_cnt > 0:
         kb = InlineKeyboardMarkup([
             [
-                _btn("🧹 Destroy Next Batch", "dlt:menu", BLUE),
+                _btn("🧹 Clean Next Batch", "dlt:menu", BLUE),
                 _btn("❌ Close", "set:close", RED),
             ]
         ])

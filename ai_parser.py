@@ -14,7 +14,34 @@ from utils import parse_tat
 
 log = logging.getLogger(__name__)
 
-GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+AVAILABLE_GEMINI_MODELS = [
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-3.8-flash-lite",
+    "gemini-3.8-flash",
+]
+
+
+async def _post_gemini(payload: dict, timeout: float = 12.0) -> Optional[dict]:
+    """Posts payload to available Gemini models with automatic fallback on 404/503/429."""
+    if not config.GEMINI_API_KEY:
+        return None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for model in AVAILABLE_GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={config.GEMINI_API_KEY}"
+            try:
+                r = await client.post(url, json=payload)
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code in (404, 503, 429):
+                    log.info("Gemini model %s returned %s, trying next model...", model, r.status_code)
+                    continue
+                else:
+                    log.warning("Gemini model %s returned %s: %s", model, r.status_code, r.text[:120])
+            except Exception as e:
+                log.info("Gemini model %s call failed (%s), trying next...", model, e)
+                continue
+    return None
 
 
 async def parse_deal_details(text: str) -> Optional[Dict[str, Any]]:
@@ -31,7 +58,6 @@ async def parse_deal_details(text: str) -> Optional[Dict[str, Any]]:
 
 
 async def _call_gemini(text: str) -> Optional[Dict[str, Any]]:
-    url = f"{GEMINI_ENDPOINT}?key={config.GEMINI_API_KEY}"
     prompt = (
         "You are an escrow middleman assistant parsing deal information. "
         "Extract the deal details from the text below and return ONLY valid JSON matching this schema:\n"
@@ -51,14 +77,15 @@ async def _call_gemini(text: str) -> Optional[Dict[str, Any]]:
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
     }
 
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        r = await client.post(url, json=payload)
-        if r.status_code == 200:
-            data = r.json()
+    data = await _post_gemini(payload, timeout=10.0)
+    if data and "candidates" in data and data["candidates"]:
+        try:
             raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(raw_json)
             _normalize_fields(parsed)
             return parsed
+        except Exception as e:
+            log.warning("Could not parse JSON from Gemini response: %s", e)
     return None
 
 
@@ -289,52 +316,52 @@ async def _call_gemini_reasoning(deal: dict, chat_messages: list = None, extra_c
         f"Deal #{deal_no}\n"
         f"Item: {item}\n"
         f"Amount: {amt} {curr}\n"
-        f"Payment: {pay}\n"
+        f"Payment Network: {pay}\n"
         f"Buyer: @{b_un}\n"
         f"Seller: @{s_un}\n"
         f"Status: {status}\n"
     )
 
-    chat_text = "\n".join(chat_messages) if chat_messages else "No chat history available."
+    chat_text = "\n".join(chat_messages) if chat_messages else "No chat history recorded yet."
     if extra_context:
-        chat_text += f"\nContext message: {extra_context}"
+        chat_text += f"\nAdditional Context: {extra_context}"
 
     prompt = (
-        "You are an expert escrow middleman assistant analyzing a Telegram deal chat.\n"
-        "Analyze the buyer and seller messages and deal details below.\n\n"
-        "Write a concise, professional, and clear 5 to 6 lines summary/conclusion strictly in HINGLISH "
-        "(conversational Hindi written in English/Latin script, as commonly spoken in Indian trading communities).\n"
-        "Cover:\n"
-        "1. What the deal was about (item and amount).\n"
-        "2. How the buyer and seller communicated/agreed.\n"
-        "3. Middleman safely holding funds in escrow.\n"
-        "4. How handover and verification took place.\n"
-        "5. Final conclusion on how the deal went smooth without disputes.\n\n"
-        "Rules:\n"
-        "- Strictly 5 to 6 bullet lines.\n"
-        "- Start each line with an emoji number: 1️⃣, 2️⃣, 3️⃣, 4️⃣, 5️⃣ (and 6️⃣ if 6 lines).\n"
-        "- Language MUST be pure natural Hinglish (e.g. 'Buyer @buyer aur Seller @seller ne deal terms finalize ki...', 'Payment securely MM ke paas hold hui...', 'Deal smoothly conclude ho gayi bina kisi issue ke...').\n"
+        "You are an expert escrow middleman assistant analyzing an actual Telegram deal chat.\n"
+        "Carefully read and analyze the actual conversation between the buyer, seller, and middleman below.\n\n"
+        "Write an accurate, specific, 5 to 6 lines summary of what ACTUALLY happened in this deal strictly in natural HINGLISH "
+        "(conversational Hindi written in English/Latin script, as spoken in Indian escrow trading groups).\n\n"
+        "Instructions:\n"
+        "1. Start with what was traded (specific item/account/channel/service) and exact amount.\n"
+        "2. Describe the actual communication: what did buyer and seller say, confirm, or request in the chat.\n"
+        "3. Detail the specific handover: mention what credentials, logins, email access, keys, links, or files were given by the seller.\n"
+        "4. Mention specific verification/checks: did buyer test login, ask for OTP, change email/password, or raise any issue/delay?\n"
+        "5. Give the genuine final conclusion based on the chat: whether buyer confirmed everything was working, if middleman released payment, or if there was an issue/dispute.\n\n"
+        "CRITICAL RULES:\n"
+        "- Base your summary ENTIRELY on the provided chat messages. Do NOT hallucinate or use generic boilerplate.\n"
+        "- NEVER just say 'deal went smooth' unless the chat truly shows an effortless deal with zero issues.\n"
+        "- If the chat shows any argument, problem, OTP delay, wrong credentials, or refund, state it honestly.\n"
+        "- Strictly 5 to 6 bullet lines, each starting with an emoji number: 1️⃣, 2️⃣, 3️⃣, 4️⃣, 5️⃣ (and 6️⃣ if 6 lines).\n"
         "- DO NOT use markdown bold with ** because it breaks HTML formatting. Use <b>bold text</b> tags instead.\n"
-        "- Return ONLY the 5-6 bullet lines, nothing else.\n"
-        "- NEVER mention AI, artificial intelligence, Gemini, or language model. Act as MiddleShield Bot's direct escrow verification.\n\n"
+        "- Return ONLY the bullet points, no commentary, no mentions of AI or language models.\n\n"
         f"Deal Info:\n{deal_summary}\n\n"
         f"Chat Messages:\n{chat_text}"
     )
 
-    url = f"{GEMINI_ENDPOINT}?key={config.GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3},
+        "generationConfig": {"temperature": 0.2},
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(url, json=payload)
-        if r.status_code == 200:
-            data = r.json()
+    data = await _post_gemini(payload, timeout=12.0)
+    if data and "candidates" in data and data["candidates"]:
+        try:
             text_out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             # Clean up markdown bold if any
             text_out = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text_out)
             return text_out
+        except Exception as e:
+            log.warning("Could not extract reasoning text from Gemini response: %s", e)
     return None
 
 
@@ -347,12 +374,43 @@ def _generate_local_reasoning(deal: dict, chat_messages: list = None) -> str:
     s_un = deal.get("seller_username") or "Seller"
     pay = deal.get("payment_network", "UPI")
 
+    # If we have actual chat messages, inspect them to generate context-rich points
+    if chat_messages and len(chat_messages) > 1:
+        all_text = " ".join(chat_messages).lower()
+        has_otp = any(k in all_text for k in ("otp", "code", "2fa", "verification"))
+        has_login = any(k in all_text for k in ("login", "pass", "password", "email", "mail", "access", "id"))
+        has_done = any(k in all_text for k in ("done", "received", "working", "check", "verify", "verified", "ok", "fine"))
+        has_dispute = any(k in all_text for k in ("problem", "issue", "scam", "wait", "delay", "cancel", "refund", "not working", "fake"))
+
+        handover_line = "Seller ne credentials/item provide kiye (login & access details share hui)." if has_login else "Seller ne agreed item/credentials buyer ko handover kiye."
+        if has_otp:
+            handover_line += " OTP/security verification process complete kiya gaya."
+
+        if has_dispute:
+            verify_line = "Chat me queries/concerns raise hue jinko parties ne verify aur discuss kiya."
+            conclusion_line = "Middleman aur parties ne milkar situation review ki aur deal terms resolve hue."
+        elif has_done:
+            verify_line = "Buyer ne login karke credentials aur item details completely verify kiye."
+            conclusion_line = "Buyer confirmation ke baad middleman escrow process successfully conclude hua."
+        else:
+            verify_line = "Buyer verification process ongoing tha chat me."
+            conclusion_line = "Both parties ne terms ke according deal proceed ki."
+
+        lines = [
+            f"1️⃣ <b>Deal Terms:</b> Buyer @{b_un} aur Seller @{s_un} ke beech <b>{item}</b> ({amt} {curr}) ki deal group chat me start hui.",
+            f"2️⃣ <b>Escrow Status:</b> Middleman escrow security me funds ({pay}) safely deposit & hold hue.",
+            f"3️⃣ <b>Handover Details:</b> {handover_line}",
+            f"4️⃣ <b>Verification Step:</b> {verify_line}",
+            f"5️⃣ <b>Chat Outcome:</b> {conclusion_line}",
+        ]
+        return "\n".join(lines)
+
     lines = [
-        f"1️⃣ <b>Deal Start:</b> Buyer @{b_un} aur Seller @{s_un} ke beech <b>{item}</b> ke liye deal confirm hui.",
-        f"2️⃣ <b>Escrow Secure:</b> Middleman ne <b>{amt} {curr}</b> ({pay}) payment securely hold kiya tha.",
-        f"3️⃣ <b>Handover:</b> Seller ne deal credentials/item smoothly Buyer ko provide kiye.",
-        f"4️⃣ <b>Verification:</b> Buyer ne check karke verify kiya ki sabkuch bilkul deal terms ke mutabiq hai.",
-        f"5️⃣ <b>Smooth Conclusion:</b> Dono parties ka coordination best raha aur deal completely safe & smooth conclude hui.",
+        f"1️⃣ <b>Deal Start:</b> Buyer @{b_un} aur Seller @{s_un} ke beech <b>{item}</b> ({amt} {curr}) ki deal register hui.",
+        f"2️⃣ <b>Escrow Hold:</b> Middleman ne payment securely escrow me hold kiya tha ({pay}).",
+        f"3️⃣ <b>Handover:</b> Seller ne agreed deal items/credentials provide kiye.",
+        f"4️⃣ <b>Verification:</b> Buyer ne check karke verify kiya ki deal terms fulfill ho chuke hain.",
+        f"5️⃣ <b>Conclusion:</b> Dono parties ki agreement ke mutabiq deal conclude hui.",
     ]
     return "\n".join(lines)
 
@@ -371,7 +429,6 @@ async def parse_deal_edits(text: str, current_deal: dict = None) -> Dict[str, An
 
 
 async def _call_gemini_edits(text: str) -> Optional[Dict[str, Any]]:
-    url = f"{GEMINI_ENDPOINT}?key={config.GEMINI_API_KEY}"
     prompt = (
         "You are an assistant for an escrow bot. Extract deal update fields from the input text.\n"
         "Only extract fields that the user explicitly wants to update or specifies.\n"
@@ -392,10 +449,9 @@ async def _call_gemini_edits(text: str) -> Optional[Dict[str, Any]]:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
     }
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        r = await client.post(url, json=payload)
-        if r.status_code == 200:
-            data = r.json()
+    data = await _post_gemini(payload, timeout=10.0)
+    if data and "candidates" in data and data["candidates"]:
+        try:
             raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(raw_json)
             if parsed and isinstance(parsed, dict):
@@ -411,6 +467,9 @@ async def _call_gemini_edits(text: str) -> Optional[Dict[str, Any]]:
                     if "payment_network" in parsed:
                         parsed["payment_network"] = n
                 return parsed
+        except Exception as e:
+            log.warning("Could not parse JSON from Gemini edits response: %s", e)
+    return None
     return None
 
 

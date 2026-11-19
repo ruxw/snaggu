@@ -374,10 +374,10 @@ def run_tests():
     lines = [l for l in reasoning.strip().splitlines() if l.strip()]
     assert len(lines) == 5, f"Expected 5 lines, got {len(lines)}"
     assert "1️⃣" in lines[0] and "5️⃣" in lines[-1]
-    assert any("smooth" in l.lower() for l in lines)
+    assert any("conclude" in l.lower() or "conclusion" in l.lower() for l in lines)
     assert any("buyer" in l.lower() for l in lines)
     assert any("seller" in l.lower() for l in lines)
-    print("✓ AI Hinglish deal reasoning generated exactly 5 lines with smooth conclusion.")
+    print("✓ AI Hinglish deal reasoning generated exactly 5 lines with factual conclusion.")
 
     # 15. Testing Quick Deal Edits (/edits extraction)
     print("\n--- 15. Testing Quick Deal Edits (/edits extraction) ---")

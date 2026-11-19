@@ -216,22 +216,54 @@ async def _handle_instant_mm(event, other_id: int, bot_username: str):
         log.exception("Error handling /mm instant room creation")
 
 
-async def get_recent_messages(chat_id: int, limit: int = 35) -> list:
-    """Fetch recent message strings from a group chat using Telethon userbot."""
+async def get_recent_messages(chat_id: int, limit: int = 60) -> list:
+    """Fetch recent human conversation message strings from a group chat using Telethon userbot."""
     if not client or not client.is_connected():
         return []
     try:
         msgs = []
-        peer = await client.get_input_entity(chat_id)
+        peer = None
+        try:
+            peer = await client.get_input_entity(chat_id)
+        except Exception:
+            try:
+                entity = await client.get_entity(chat_id)
+                peer = await client.get_input_entity(entity)
+            except Exception as e2:
+                log.warning("Could not resolve input entity for chat %s: %s", chat_id, e2)
+
+        if not peer:
+            cid_str = str(chat_id)
+            real_id = int(cid_str[4:]) if cid_str.startswith("-100") else abs(int(chat_id))
+            peer = types.InputChannel(channel_id=real_id, access_hash=0)
+
+        bot_un_lower = (config.BOT_USERNAME or "").lower().lstrip("@")
         async for m in client.iter_messages(peer, limit=limit):
-            if m and m.text:
-                sender = "User"
-                if m.sender:
-                    if getattr(m.sender, "username", None):
-                        sender = f"@{m.sender.username}"
-                    elif getattr(m.sender, "first_name", None):
-                        sender = m.sender.first_name
-                msgs.append(f"{sender}: {m.text.strip()}")
+            if not m:
+                continue
+            text = (m.text or m.message or getattr(m, "caption", "") or "").strip()
+            if not text:
+                continue
+            # Filter out bot operational commands to keep pure chat details
+            if text.startswith(("/", "!", ".")) and len(text.split()[0]) < 25:
+                cmd_word = text.split()[0].lower().lstrip("/!.")
+                if cmd_word in ("ai", "paid", "hold", "release", "close", "begin", "extendtat",
+                                "tatedit", "editamt", "editdeal", "vouch", "dlt", "start"):
+                    continue
+
+            sender = "Participant"
+            if m.sender:
+                s_un = getattr(m.sender, "username", None)
+                s_fn = getattr(m.sender, "first_name", None)
+                # Skip messages sent by the bot itself
+                if s_un and bot_un_lower and s_un.lower() == bot_un_lower:
+                    continue
+                if s_un:
+                    sender = f"@{s_un}"
+                elif s_fn:
+                    sender = s_fn
+
+            msgs.append(f"{sender}: {text}")
         msgs.reverse()
         return msgs
     except Exception as e:

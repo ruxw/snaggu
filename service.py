@@ -317,10 +317,14 @@ async def start_deal_tat(bot, deal, user_id: int):
     await safe_send(bot, chat_id, begin_msg)
     await asyncio.sleep(0.5)
 
-    # 2. Compute remaining timer string
-    timer_str = _compute_timer(tat_seconds)
+    # 2. Compute dynamic native Telegram date_time entities (Bot API 8.0+)
+    # Telegram client updates relative countdown dynamically on screen without message spam
+    deadline_ts = int(deadline.timestamp())
+    timer_fallback = _compute_timer(tat_seconds)
+    dynamic_timer = f'<tg-time unix="{deadline_ts}" format="r">{timer_fallback}</tg-time>'
+    dynamic_deadline = f'<tg-time unix="{deadline_ts}">{fmt_dt(deadline)}</tg-time>'
 
-    # 3. Countdown message (new compact format)
+    # 3. Countdown message with native dynamic timestamp
     countdown_msg = settings.render_template(
         "tat_notification",
         deal_id=str(deal.get("deal_no", "")),
@@ -329,8 +333,9 @@ async def start_deal_tat(bot, deal, user_id: int):
         amount=str(deal.get("amount", "0")),
         currency=str(deal.get("currency", "")),
         tat=fmt_duration(tat_seconds),
-        deadline=fmt_dt(deadline),
-        timer=timer_str,
+        deadline=dynamic_deadline,
+        timer=dynamic_timer,
+        deadline_unix=str(deadline_ts),
     )
     mm_url = settings.get("mm_channel_url", config.CHANNEL_URL)
     cid = emojis.get_custom_id("CHANNEL")
@@ -398,11 +403,17 @@ async def extend_deal_tat(bot, deal, ext_seconds: int, duration_str: str, user_i
     )
 
     chat_id = deal["group_chat_id"]
+    new_deadline_ts = int(new_deadline.timestamp())
+    dynamic_new_timer = f'<tg-time unix="{new_deadline_ts}" format="r">+{duration_str}</tg-time>'
+    dynamic_new_deadline = f'<tg-time unix="{new_deadline_ts}">{fmt_dt(new_deadline)}</tg-time>'
+
     ext_msg = settings.render_template(
         "tat_extension",
         duration=duration_str,
-        deadline=fmt_dt(new_deadline),
+        deadline=dynamic_new_deadline,
         deal_id=str(deal.get("deal_no", "")),
+        timer=dynamic_new_timer,
+        deadline_unix=str(new_deadline_ts),
     )
     await safe_send(bot, chat_id, ext_msg)
 
@@ -412,7 +423,10 @@ async def extend_deal_tat(bot, deal, ext_seconds: int, duration_str: str, user_i
         buyer_tag = user_mention(deal.get("buyer_id", 0), deal.get("buyer_username"))
         seller_tag = user_mention(deal.get("seller_id", 0), deal.get("seller_username"))
         remaining = int((new_deadline - now).total_seconds())
-        timer_str = _compute_timer(remaining)
+        timer_fallback = _compute_timer(remaining)
+        dynamic_timer = f'<tg-time unix="{new_deadline_ts}" format="r">{timer_fallback}</tg-time>'
+        dynamic_deadline = f'<tg-time unix="{new_deadline_ts}">{fmt_dt(new_deadline)}</tg-time>'
+
         updated_card = settings.render_template(
             "tat_notification",
             deal_id=str(deal.get("deal_no", "")),
@@ -421,8 +435,9 @@ async def extend_deal_tat(bot, deal, ext_seconds: int, duration_str: str, user_i
             amount=str(deal.get("amount", "0")),
             currency=str(deal.get("currency", "")),
             tat=fmt_duration(new_tat_secs),
-            deadline=fmt_dt(new_deadline),
-            timer=timer_str,
+            deadline=dynamic_deadline,
+            timer=dynamic_timer,
+            deadline_unix=str(new_deadline_ts),
         )
         try:
             await bot.edit_message_text(
