@@ -6,7 +6,15 @@ import threading
 from html import escape as _esc
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ExtBot, MessageHandler, filters
@@ -66,19 +74,33 @@ def _run_web():
 def start_keepalive():
     threading.Thread(target=_run_web, daemon=True).start()
 
-COMMANDS = [
+# Commands shown to normal users in private chats (hide all MM/admin & GC-only commands)
+USER_PRIVATE_COMMANDS = [
     BotCommand("start", "Start the bot & open main menu"),
     BotCommand("deal", "Set up a new deal"),
     BotCommand("mm", "Instantly create a deal group"),
     BotCommand("chat", "Direct chat with middleman"),
-    BotCommand("settings", "Middleman admin dashboard"),
-    BotCommand("stats", "Live middleman statistics"),
-    BotCommand("ad", "MM: Manage advertisement footer"),
     BotCommand("deals", "View deal history"),
     BotCommand("referral", "Check referral points"),
     BotCommand("redeem", "Exchange points for gifts"),
     BotCommand("leaderboard", "View top 10 deal makers"),
     BotCommand("id", "Retrieve user IDs and chat IDs"),
+    BotCommand("cancel", "Cancel current wizard or action"),
+]
+
+# Commands shown to normal users in deal groups (hide MM commands)
+USER_GROUP_COMMANDS = [
+    BotCommand("buyer", "Claim or view buyer role"),
+    BotCommand("seller", "Claim or view seller role"),
+    BotCommand("paid", "Notify that payment was sent"),
+    BotCommand("complete", "Mark deal completed"),
+    BotCommand("id", "Retrieve chat and user ID"),
+]
+
+# Commands shown to group administrators (Middleman in deal groups)
+ADMIN_GROUP_COMMANDS = [
+    BotCommand("editdeal", "MM: Interactive deal editor (/edeal)"),
+    BotCommand("edeal", "MM: Quick deal editor alias"),
     BotCommand("settat", "MM: Set turnaround time for deal"),
     BotCommand("begin", "MM: Confirm payment & start countdown"),
     BotCommand("extendtat", "MM: Extend active TAT deadline"),
@@ -87,13 +109,58 @@ COMMANDS = [
     BotCommand("release", "MM: Set status & group title to released"),
     BotCommand("close", "MM: Close deal & mute participants"),
     BotCommand("ai", "MM: AI deal reasoning in Hinglish"),
-    BotCommand("edits", "MM: Quick deal editor (chat or menu)"),
-    BotCommand("editdeal", "MM: Interactive deal editor"),
     BotCommand("editamt", "MM: Edit deal amount & payment method"),
-    BotCommand("bd", "MM: Broadcast message to users/deal GCs"),
-    BotCommand("dlt", "MM: Bulk clean/delete closed deal GCs"),
-    BotCommand("cancel", "Cancel current wizard or action"),
+    BotCommand("buyer", "Assign buyer role"),
+    BotCommand("seller", "Assign seller role"),
+    BotCommand("id", "Retrieve user IDs and chat IDs"),
 ]
+
+# Commands shown to Middleman in private chat
+MM_PRIVATE_COMMANDS = [
+    BotCommand("start", "Open main menu"),
+    BotCommand("settings", "Middleman admin dashboard"),
+    BotCommand("stats", "Live middleman statistics"),
+    BotCommand("ad", "Manage advertisement footer"),
+    BotCommand("bd", "Broadcast message to users/deal GCs"),
+    BotCommand("dlt", "Bulk clean/delete closed deal GCs"),
+    BotCommand("mm", "Instantly create a deal group"),
+    BotCommand("deal", "Set up a new deal"),
+    BotCommand("deals", "View deal history"),
+    BotCommand("leaderboard", "View top 10 deal makers"),
+    BotCommand("id", "Retrieve IDs"),
+    BotCommand("cancel", "Cancel current action"),
+]
+
+
+async def register_scoped_commands(bot):
+    """Registers separate command scopes: normal users never see MM commands."""
+    try:
+        # Default / private chats for normal users
+        await bot.set_my_commands(USER_PRIVATE_COMMANDS, scope=BotCommandScopeDefault())
+        await bot.set_my_commands(USER_PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+
+        # Deal groups for normal users
+        await bot.set_my_commands(USER_GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
+
+        # Deal group admins (Middleman)
+        await bot.set_my_commands(ADMIN_GROUP_COMMANDS, scope=BotCommandScopeAllChatAdministrators())
+
+        # Middleman private chats
+        mm_ids = set(config.MM_USER_IDS)
+        if config.MM_USER_ID:
+            mm_ids.add(config.MM_USER_ID)
+        ub_mm = getattr(userbot, "mm_user_id", None)
+        if ub_mm:
+            mm_ids.add(ub_mm)
+
+        for uid in mm_ids:
+            if uid:
+                try:
+                    await bot.set_my_commands(MM_PRIVATE_COMMANDS, scope=BotCommandScopeChat(chat_id=uid))
+                except Exception as e:
+                    log.debug("Could not set MM private commands for %s: %s", uid, e)
+    except Exception as e:
+        log.warning("Scoped command registration encountered an error: %s", e)
 
 
 class EmojiBot(ExtBot):
@@ -231,8 +298,8 @@ async def post_init(app: Application):
     userbot.set_instant_deal_callback(lambda deal: service.init_instant_deal_room(app, deal))
     userbot.setup_listeners(app.bot.username)
 
-    log.info("3/5 Registering bot commands...")
-    await app.bot.set_my_commands(COMMANDS)
+    log.info("3/5 Registering scoped bot commands...")
+    await register_scoped_commands(app.bot)
 
     log.info("4/5 Recovering interrupted deals...")
     await service.recover_interrupted(app)
@@ -267,6 +334,7 @@ def main():
         ("mm", h.mm_dm_cmd), ("livechat", h.livechat_cmd), ("endchat", h.endchat_cmd),
         ("settings", h.settings_cmd), ("stats", h.stats_cmd), ("ad", h.ad_cmd), ("reply", h.reply_cmd),
         ("bd", h.bd_cmd), ("broadcast", h.bd_cmd), ("dlt", h.dlt_cmd), ("cancel", h.cancel_cmd),
+        ("editdeal", h.editdeal_cmd), ("edeal", h.edeal_cmd), ("edits", h.edits_cmd),
     ):
         app.add_handler(CommandHandler(name, fn, filters=private))
 
@@ -285,8 +353,7 @@ def main():
     app.add_handler(CommandHandler("complete", h.complete_cmd, filters=groups))
     app.add_handler(CommandHandler("done", h.complete_cmd, filters=groups))
     app.add_handler(CommandHandler("ai", h.ai_cmd, filters=groups))
-    app.add_handler(CommandHandler("edits", h.edits_cmd, filters=groups))
-    app.add_handler(CommandHandler("editdeal", h.editdeal_cmd, filters=groups))
+    app.add_handler(CommandHandler(["editdeal", "edeal", "edits"], h.editdeal_cmd, filters=groups))
     app.add_handler(CommandHandler("editamt", h.editamt_cmd, filters=groups))
     app.add_handler(CommandHandler(["bd", "broadcast"], h.bd_cmd, filters=groups))
     app.add_handler(CommandHandler("dlt", h.dlt_cmd, filters=groups))

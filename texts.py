@@ -1,4 +1,6 @@
 from html import escape as esc
+import re
+from typing import Any, Optional
 
 import config
 import emojis
@@ -32,11 +34,32 @@ def _amount(d) -> str:
     return esc(amt)
 
 
-def calculate_fee_details(amt_str: str, fee_str: str, curr_str: str):
-    """Calculates fee amount and total amount supporting flat fees and percentage fees (e.g. '4%').
+def resolve_deal_fee(amt_str: Any, curr_str: str = "INR", custom_fee: Optional[str] = None) -> str:
+    """Resolves effective fee string for a deal.
+    If deal has a custom_fee set by MM, uses that.
+    Otherwise checks tiered fee chart from settings if enabled.
+    Falls back to default_fee."""
+    if custom_fee and str(custom_fee).strip():
+        return str(custom_fee).strip()
+    if settings.get("fee_chart_enabled", True):
+        try:
+            nums = re.findall(r"\d+(?:\.\d+)?", str(amt_str or "0").replace(",", ""))
+            if nums:
+                val = float(nums[0])
+                slabs = settings.get("fee_chart_slabs", [])
+                chart_fee = settings.get_chart_fee_for_amount(val, slabs)
+                if chart_fee:
+                    return chart_fee
+        except Exception:
+            pass
+    return settings.get("default_fee", "4%")
+
+
+def calculate_fee_details(amt_str: str, fee_str: Optional[str], curr_str: str, custom_fee: Optional[str] = None):
+    """Calculates fee amount and total amount supporting flat fees, percentage fees (e.g. '4%'),
+    and tiered fee charts.
     Returns (fee_val, fee_disp, tot_val, tot_disp).
     """
-    import re
     from decimal import Decimal
     sym = get_currency_symbol(curr_str)
     cur = str(curr_str or "").strip()
@@ -45,6 +68,10 @@ def calculate_fee_details(amt_str: str, fee_str: str, curr_str: str):
         a_val = Decimal(a_nums[0]) if a_nums else Decimal(0)
     except Exception:
         a_val = Decimal(0)
+
+    # If fee_str is not provided, resolve it
+    if not fee_str or fee_str == "None":
+        fee_str = resolve_deal_fee(amt_str, curr_str, custom_fee=custom_fee)
 
     fee_val = Decimal(0)
     fee_disp = str(fee_str or "").strip()
@@ -56,6 +83,13 @@ def calculate_fee_details(amt_str: str, fee_str: str, curr_str: str):
             fee_disp = f"{pct:g}%"
         elif f_nums:
             fee_val = Decimal(f_nums[0])
+            # If fee was just a number like 35 or 50, format with currency
+            if sym in ("₹", "$", "€", "£") and sym not in fee_disp and cur not in fee_disp:
+                fee_disp = f"{sym}{fee_val:g}"
+            elif cur and cur not in fee_disp and sym not in fee_disp:
+                fee_disp = f"{fee_val:g} {cur}".strip()
+            else:
+                fee_disp = f"{fee_val:g}"
     except Exception:
         pass
 
@@ -76,7 +110,9 @@ def _calc_total(amt_str: str, fee_str: str, curr_str: str) -> str:
 
 
 def summary_text(d) -> str:
-    fee_info = esc(str(d.get("fee") or settings.get("default_fee", "Charged separately")))
+    fee_raw = resolve_deal_fee(d.get("amount", "0"), d.get("currency", "INR"), custom_fee=d.get("fee"))
+    _, fee_info, _, _ = calculate_fee_details(d.get("amount", "0"), fee_raw, d.get("currency", "INR"))
+    fee_info = esc(fee_info)
     return (
         "🤝 <b>DEAL SUMMARY</b>\n\n"
         f"👤 <b>Buyer:</b> @{esc(d['buyer_username'])}\n"
@@ -93,7 +129,9 @@ def summary_text(d) -> str:
 
 def request_text(d) -> str:
     role = "Buyer" if d.get("initiator_role") == "buyer" else "Seller"
-    fee_info = esc(str(d.get("fee") or settings.get("default_fee", "Charged separately")))
+    fee_raw = resolve_deal_fee(d.get("amount", "0"), d.get("currency", "INR"), custom_fee=d.get("fee"))
+    _, fee_info, _, _ = calculate_fee_details(d.get("amount", "0"), fee_raw, d.get("currency", "INR"))
+    fee_info = esc(fee_info)
     return (
         "🤝 <b>NEW DEAL REQUEST</b>\n\n"
         f"👤 <b>From:</b> @{esc(d['initiator_username'])} ({role})\n"
@@ -175,12 +213,12 @@ def livechat_user_msg_alert(sender_name: str, username: str, user_id: int, text:
 def instant_deal_details_prompt(tos_url: str = None) -> str:
     return (
         "📋 <b>Deal Details Required</b>\n\n"
-        "Reply with the deal details in this format:\n\n"
+        "Send your deal details or chat naturally:\n"
         "• <b>Item:</b> (e.g. Instagram account)\n"
-        "• <b>Amount:</b> (e.g. 5000)\n"
-        "• <b>Currency:</b> INR / USD / USDT\n"
-        "• <b>TAT:</b> (e.g. 2h, 24h)\n"
-        "• <b>Conditions:</b> (or None)"
+        "• <b>Amount:</b> (e.g. 1500 UPI)\n"
+        "• <b>TAT:</b> (e.g. 2h, 24h)\n\n"
+        "🤖 <i>AI is active — details will be auto-traced from your chat.</i>\n"
+        "<i>Middleman can also use /edeal or /editdeal</i>"
     )
 
 
@@ -200,7 +238,9 @@ def instant_deal_summary(d: dict, buyer_tag: str, seller_tag: str) -> str:
     tat = esc(str(d.get("tat") or (fmt_duration(d.get("tat_seconds", 0)) if d.get("tat_seconds") else "24h")))
     payment = esc(str(d.get("payment_network") or d.get("payment_method") or "UPI"))
     conditions = esc(str(d.get("conditions") or "None"))
-    fee = esc(str(d.get("custom_fee") or settings.get("default_fee", "4%")))
+    fee_raw = resolve_deal_fee(amt, curr, custom_fee=d.get("custom_fee"))
+    _, fee_disp, _, _ = calculate_fee_details(amt, fee_raw, curr)
+    fee = esc(fee_disp)
 
     return (
         f"<b>MMd {dno}</b>\n\n"

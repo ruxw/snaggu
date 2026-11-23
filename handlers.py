@@ -277,38 +277,46 @@ async def settings_cmd(update, ctx):
 
 async def _show_settings_dashboard(send_or_edit_fn):
     cur_fee = settings.get("default_fee", "4%")
+    chart_on = settings.get("fee_chart_enabled", True)
+    fsm_on = settings.get("fsm_mode", True)
+    fee_disp = "Tiered Chart (Active)" if chart_on else str(cur_fee)
+    fsm_disp = "Active (No Spam) ✅" if fsm_on else "Standard ❌"
     upi_id = settings.get("upi_id") or "Not set"
 
     kb = InlineKeyboardMarkup([
         [
-            _btn(f"💰 Fee: {cur_fee}", "set:fee", GREEN),
+            _btn(f"💰 Fee: {fee_disp}", "set:fee", GREEN),
+            _btn(f"🛡️ FSM: {'ON' if fsm_on else 'OFF'}", "set:toggle_fsm", GREEN if fsm_on else BLUE),
+        ],
+        [
             _btn("💳 UPI", "set:upi", BLUE),
-        ],
-        [
             _btn("🪙 Cryptos", "set:crypto_page:0", GREEN),
+        ],
+        [
             _btn("📢 Channels", "set:channels", BLUE),
-        ],
-        [
             _btn("🏷️ GC Style & Photo", "set:gc_appearance", GREEN),
+        ],
+        [
             _btn("⭐ Vouch Format", "set:vouch_format", BLUE),
-        ],
-        [
             _btn("📝 Templates", "set:templates", GREEN),
+        ],
+        [
             _btn("📢 Sponsored Ad", "ad:manage", BLUE),
-        ],
-        [
             _btn("📢 Broadcast", "set:broadcast", BLUE),
-            _btn("🧹 Clean GCs (/dlt)", "set:dlt", GREEN),
         ],
         [
+            _btn("🧹 Clean GCs (/dlt)", "set:dlt", GREEN),
             _btn("🏆 Top Users (Leaderboard)", "set:leaderboard", GREEN),
+        ],
+        [
             _btn("❌ Close", "set:close", RED),
         ],
     ])
 
     text = (
         f"{emojis.EMOJI_SETTINGS} <b>@{config.MM_USERNAME} Settings</b>\n\n"
-        f"• 💰 <b>Fee:</b> <code>{esc(str(cur_fee))}</code>\n"
+        f"• 💰 <b>Fee:</b> <code>{esc(str(fee_disp))}</code>\n"
+        f"• 🛡️ <b>FSM Mode:</b> <code>{esc(fsm_disp)}</code>\n"
         f"• 💳 <b>UPI:</b> <code>{esc(str(upi_id))}</code>\n"
         f"• 📢 <b>Official:</b> {settings.get('mm_channel_url', 'Not set')}\n"
         f"• ⭐ <b>Vouch:</b> {settings.get('vouch_channel_url', 'Not set')}\n"
@@ -521,20 +529,35 @@ async def settings_callback(update, ctx):
         )
         await q.edit_message_text(t, reply_markup=kb, parse_mode=HTML)
 
+    elif action == "toggle_fsm":
+        cur_fsm = settings.get("fsm_mode", True)
+        new_fsm = not cur_fsm
+        await settings.set_setting("fsm_mode", new_fsm)
+        await q.answer(f"FSM Mode {'Enabled (No Spam)' if new_fsm else 'Disabled'}!", show_alert=True)
+        await _show_settings_dashboard(q.edit_message_text)
+        return
+
     elif action == "fee":
         await q.answer()
         cur_fee = settings.get("default_fee", "4%")
+        chart_on = settings.get("fee_chart_enabled", True)
+        chart_slabs = settings.get("fee_chart_slabs", [])
+        status_chart = "Active ✅" if (chart_on and chart_slabs) else "Disabled ❌"
+
         kb = InlineKeyboardMarkup([
             [
-                _btn("4%", "set:fee_pick:4%", GREEN),
-                _btn("5%", "set:fee_pick:5%", GREEN),
-                _btn("3%", "set:fee_pick:3%", GREEN),
-                _btn("2%", "set:fee_pick:2%", GREEN),
+                _btn("📊 Custom Fee Chart / Slabs", "set:fee_chart", GREEN),
+            ],
+            [
+                _btn("4%", "set:fee_pick:4%", BLUE),
+                _btn("5%", "set:fee_pick:5%", BLUE),
+                _btn("3%", "set:fee_pick:3%", BLUE),
+                _btn("2%", "set:fee_pick:2%", BLUE),
             ],
             [
                 _btn("50 INR", "set:fee_pick:50 INR", BLUE),
                 _btn("100 INR", "set:fee_pick:100 INR", BLUE),
-                _btn("✏️ Custom Fee", "set:edit:default_fee", BLUE),
+                _btn("✏️ Custom Flat/Pct Fee", "set:edit:default_fee", BLUE),
             ],
             [
                 _btn("⬅️ Back to Settings", "set:main", BLUE),
@@ -543,10 +566,123 @@ async def settings_callback(update, ctx):
         ])
         t = (
             "💰 <b>Middleman Fee Setting</b>\n\n"
-            f"Current Fee: <b>{esc(str(cur_fee))}</b>\n"
-            "Choose a preset or set custom fee:"
+            f"• <b>Fee Chart (Tiered Slabs):</b> <code>{status_chart}</code>\n"
+            f"• <b>Fallback / Default Fee:</b> <code>{esc(str(cur_fee))}</code>\n\n"
+            "Configure a tiered custom fee chart (e.g. 200-900: 35, 2000+: 4%) or set a flat/percentage fee:"
         )
         await q.edit_message_text(t, reply_markup=kb, parse_mode=HTML)
+
+    elif action == "fee_chart":
+        await q.answer()
+        chart_on = settings.get("fee_chart_enabled", True)
+        chart_slabs = settings.get("fee_chart_slabs", [])
+        formatted = settings.format_fee_chart(chart_slabs)
+        status_str = "Enabled ✅" if chart_on else "Disabled ❌"
+
+        kb = InlineKeyboardMarkup([
+            [
+                _btn("✏️ Edit Custom Chart", "set:edit_fee_chart", GREEN),
+                _btn(f"🔄 Toggle: {'Disable' if chart_on else 'Enable'}", "set:fee_chart_toggle", BLUE),
+            ],
+            [
+                _btn("📋 Reset to Default Chart", "set:fee_chart_reset", BLUE),
+            ],
+            [
+                _btn("⬅️ Back to Fee Settings", "set:fee", BLUE),
+                _btn("❌ Close", "set:close", RED),
+            ],
+        ])
+        t = (
+            "📊 <b>Middleman Fee Chart (Slabs)</b>\n\n"
+            f"Status: <b>{status_str}</b>\n\n"
+            f"{formatted}\n\n"
+            "<i>When enabled, the bot automatically charges fees according to the deal amount.</i>"
+        )
+        await q.edit_message_text(t, reply_markup=kb, parse_mode=HTML)
+
+    elif action == "fee_chart_toggle":
+        cur_status = settings.get("fee_chart_enabled", True)
+        await settings.set_setting("fee_chart_enabled", not cur_status)
+        await q.answer(f"Fee chart {'disabled' if cur_status else 'enabled'}!", show_alert=True)
+        # Re-render fee chart
+        chart_on = not cur_status
+        chart_slabs = settings.get("fee_chart_slabs", [])
+        formatted = settings.format_fee_chart(chart_slabs)
+        status_str = "Enabled ✅" if chart_on else "Disabled ❌"
+        kb = InlineKeyboardMarkup([
+            [
+                _btn("✏️ Edit Custom Chart", "set:edit_fee_chart", GREEN),
+                _btn(f"🔄 Toggle: {'Disable' if chart_on else 'Enable'}", "set:fee_chart_toggle", BLUE),
+            ],
+            [
+                _btn("📋 Reset to Default Chart", "set:fee_chart_reset", BLUE),
+            ],
+            [
+                _btn("⬅️ Back to Fee Settings", "set:fee", BLUE),
+                _btn("❌ Close", "set:close", RED),
+            ],
+        ])
+        t = (
+            "📊 <b>Middleman Fee Chart (Slabs)</b>\n\n"
+            f"Status: <b>{status_str}</b>\n\n"
+            f"{formatted}\n\n"
+            "<i>When enabled, the bot automatically charges fees according to the deal amount.</i>"
+        )
+        await q.edit_message_text(t, reply_markup=kb, parse_mode=HTML)
+        return
+
+    elif action == "fee_chart_reset":
+        raw = settings.DEFAULT_FEE_CHART_RAW
+        slabs = settings.parse_fee_chart(raw)
+        await settings.set_setting("fee_chart_slabs", slabs)
+        await settings.set_setting("fee_chart_raw", raw)
+        await settings.set_setting("fee_chart_enabled", True)
+        await q.answer("Fee chart reset to default!", show_alert=True)
+        formatted = settings.format_fee_chart(slabs)
+        kb = InlineKeyboardMarkup([
+            [
+                _btn("✏️ Edit Custom Chart", "set:edit_fee_chart", GREEN),
+                _btn("🔄 Toggle: Disable", "set:fee_chart_toggle", BLUE),
+            ],
+            [
+                _btn("📋 Reset to Default Chart", "set:fee_chart_reset", BLUE),
+            ],
+            [
+                _btn("⬅️ Back to Fee Settings", "set:fee", BLUE),
+                _btn("❌ Close", "set:close", RED),
+            ],
+        ])
+        t = (
+            "📊 <b>Middleman Fee Chart (Slabs)</b>\n\n"
+            "Status: <b>Enabled ✅</b>\n\n"
+            f"{formatted}\n\n"
+            "<i>When enabled, the bot automatically charges fees according to the deal amount.</i>"
+        )
+        await q.edit_message_text(t, reply_markup=kb, parse_mode=HTML)
+        return
+
+    elif action == "edit_fee_chart":
+        await q.answer()
+        _admin_sessions[user.id] = {"action": "edit_fee_chart"}
+        kb = InlineKeyboardMarkup([
+            [_btn("❌ Cancel", "set:cancel_input", RED)],
+        ])
+        t = (
+            "✏️ <b>Edit Custom Middleman Fee Chart</b>\n\n"
+            "Send your custom chart lines. Example format:\n\n"
+            "<code>200 to 900 deal amt fix mm fee - 35\n"
+            "901 to 1400 deal amt fix mm fee - 50\n"
+            "1401 to 2000 deal amt fix mm fee - 100\n"
+            "2000+ mm fee 4%</code>\n\n"
+            "<i>Or:</i>\n"
+            "<code>200-900: 35\n"
+            "901-1400: 50\n"
+            "1401-2000: 100\n"
+            "2000+: 4%</code>\n\n"
+            "Reply with your chart text below or tap Cancel:"
+        )
+        await q.message.reply_text(t, reply_markup=kb, parse_mode=HTML)
+        return
 
     elif action == "fee_pick":
         new_fee = parts[2]
@@ -1752,8 +1888,8 @@ async def instant_role_callback(update, ctx):
         await service.revoke_deal_invite(ctx.bot, fresh)
 
         if fresh.get("status") == "instant_role_selection":
-            await db.update_deal(fresh["_id"], {"status": "instant_details_pending"})
-            await q.message.reply_text(texts.instant_deal_details_prompt(), parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            p_msg = await q.message.reply_text(texts.instant_deal_details_prompt(), parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            await db.update_deal(fresh["_id"], {"status": "instant_details_pending", "details_prompt_msg_id": p_msg.message_id})
 
 
 async def group_buyer_cmd(update, ctx):
@@ -1785,8 +1921,8 @@ async def group_buyer_cmd(update, ctx):
     if fresh.get("buyer_id") and fresh.get("seller_id"):
         await service.revoke_deal_invite(ctx.bot, fresh)
         if fresh.get("status") == "instant_role_selection":
-            await db.update_deal(fresh["_id"], {"status": "instant_details_pending"})
-            await msg.reply_text(texts.instant_deal_details_prompt(), parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            p_msg = await msg.reply_text(texts.instant_deal_details_prompt(), parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            await db.update_deal(fresh["_id"], {"status": "instant_details_pending", "details_prompt_msg_id": p_msg.message_id})
 
 
 async def group_seller_cmd(update, ctx):
@@ -1818,8 +1954,8 @@ async def group_seller_cmd(update, ctx):
     if fresh.get("buyer_id") and fresh.get("seller_id"):
         await service.revoke_deal_invite(ctx.bot, fresh)
         if fresh.get("status") == "instant_role_selection":
-            await db.update_deal(fresh["_id"], {"status": "instant_details_pending"})
-            await msg.reply_text(texts.instant_deal_details_prompt(), parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            p_msg = await msg.reply_text(texts.instant_deal_details_prompt(), parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            await db.update_deal(fresh["_id"], {"status": "instant_details_pending", "details_prompt_msg_id": p_msg.message_id})
 
 
 async def buyer_confirm_deal_cb(update, ctx):
@@ -2893,8 +3029,11 @@ async def edits_cmd(update, ctx):
 
 
 async def editdeal_cmd(update, ctx):
-    """Middleman /editdeal command (alias for /edits)."""
+    """Middleman /editdeal command (interactive & natural language editor)."""
     return await edits_cmd(update, ctx)
+
+
+edeal_cmd = editdeal_cmd
 
 
 async def _show_editdeal_menu(send_or_edit_fn, deal):
@@ -3708,22 +3847,32 @@ async def on_group_message(update, ctx):
         await msg.reply_text(texts.payment_pending_acknowledgement(), reply_markup=mm_kb, parse_mode=HTML)
         return
 
-    # Deal details submission in GC
+    # Deal details submission in GC (AI Auto-Tracer & FSM Mode)
     if status in ("instant_details_pending", "instant_role_selection"):
-        parsed = await ai_parser.parse_deal_details(text)
-        is_valid, missing = ai_parser.validate_parsed_deal(parsed)
-        if parsed and is_valid:
+        existing_draft = deal.get("draft_details") or {}
+        traced = await ai_parser.trace_deal_details(text, existing_draft=existing_draft)
+        is_valid, missing = ai_parser.validate_parsed_deal(traced)
+
+        if is_valid:
             deal_no = deal["deal_no"]
+            amt_val = traced["amount"]
+            curr = traced.get("currency", "INR")
+            fee_raw = texts.resolve_deal_fee(amt_val, curr, custom_fee=deal.get("custom_fee"))
+            fee_val, fee_disp, tot_val, tot_disp = texts.calculate_fee_details(amt_val, fee_raw, curr)
+
             await db.update_deal(deal["_id"], {
-                "deal_type": parsed["deal_type"],
-                "purpose": parsed["deal_type"],
-                "tat": parsed["tat"],
-                "tat_seconds": parsed["tat_seconds"],
-                "conditions": parsed["conditions"],
-                "amount": parsed["amount"],
-                "currency": parsed["currency"],
-                "payment_network": parsed["payment_network"],
+                "deal_type": traced["deal_type"],
+                "purpose": traced["deal_type"],
+                "tat": traced["tat"],
+                "tat_seconds": traced["tat_seconds"],
+                "conditions": traced["conditions"],
+                "amount": str(amt_val),
+                "currency": curr,
+                "payment_network": traced["payment_network"],
+                "custom_fee": fee_disp,
+                "total_amount": str(tot_val),
                 "status": "instant_confirmation_pending",
+                "draft_details": None,
             })
 
             fresh = await db.get_deal_by_no(deal_no)
@@ -3737,19 +3886,34 @@ async def on_group_message(update, ctx):
                     _btn("✏️ Edit Deal", f"editdeal:menu:{deal_no}", BLUE),
                 ]
             ])
+
+            # In FSM mode: clean up previous details prompt message to prevent GC clutter
+            if settings.get("fsm_mode", True):
+                prompt_msg_id = deal.get("details_prompt_msg_id")
+                if prompt_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat_id, prompt_msg_id)
+                    except Exception:
+                        pass
+
             await msg.reply_text(summary, reply_markup=kb, parse_mode=HTML)
             return
-        elif any(k in text.lower() for k in ("item", "amount", "tat", "payment", "price", "upi", "inr", "usdt", "dollar", "₹", "$")):
-            miss_str = ", ".join(missing) if missing else "Item or Amount"
-            await msg.reply_text(
-                f"⚠️ <b>Incomplete Deal Form</b>\nCould not detect: <b>{miss_str}</b>.\n\n"
-                "Please reply with all details in format:\n"
-                "• Item: (e.g. Instagram account)\n"
-                "• Amount: (e.g. 5005)\n"
-                "• Payment: UPI | TAT: 24h\n\n"
-                "Or Middleman can use <code>/editdeal</code> or <code>/ai</code>.",
-                parse_mode=HTML,
-            )
+        else:
+            # Partial details detected: accumulate into draft silently without spamming warnings
+            if traced and any(traced.get(k) for k in ("deal_type", "amount", "tat", "payment_network")):
+                await db.update_deal(deal["_id"], {"draft_details": traced})
+
+            # Check if FSM mode is disabled
+            fsm_on = settings.get("fsm_mode", True)
+            if not fsm_on:
+                if "\n" in text and any(k in text.lower() for k in ("item:", "amount:", "tat:", "payment:")):
+                    miss_str = ", ".join(missing) if missing else "Item or Amount"
+                    await msg.reply_text(
+                        f"⚠️ <b>Incomplete Deal Form</b>\nCould not detect: <b>{miss_str}</b>.\n\n"
+                        "Please provide all details or middleman can use <code>/edeal</code>.",
+                        parse_mode=HTML,
+                    )
+            # In FSM mode: SILENT tracing! Never spam casual group chat!
             return
 
     # Strict vouch detection in deal group (only triggers if message resembles configured vouch format)
@@ -3922,7 +4086,33 @@ async def on_private_message(update, ctx):
         if msg.text:
             val = msg.text.strip()
 
-            if action == "set_template":
+            if action == "edit_fee_chart":
+                slabs = settings.parse_fee_chart(val)
+                if slabs:
+                    await settings.set_setting("fee_chart_slabs", slabs)
+                    await settings.set_setting("fee_chart_raw", val)
+                    await settings.set_setting("fee_chart_enabled", True)
+                    del _admin_sessions[user.id]
+                    formatted = settings.format_fee_chart(slabs)
+                    await msg.reply_text(
+                        f"✅ <b>Custom Middleman Fee Chart Saved & Enabled!</b>\n\n{formatted}\n\n"
+                        "The bot will now automatically calculate fees based on deal amounts.",
+                        parse_mode=HTML,
+                    )
+                else:
+                    await msg.reply_text(
+                        "❌ <b>Could not parse fee chart.</b>\n\n"
+                        "Please provide valid lines like:\n"
+                        "<code>200 to 900 deal amt fix mm fee - 35\n"
+                        "901 to 1400 deal amt fix mm fee - 50\n"
+                        "1401 to 2000 deal amt fix mm fee - 100\n"
+                        "2000+ mm fee 4%</code>\n\n"
+                        "Please try again or send /cancel.",
+                        parse_mode=HTML,
+                    )
+                return
+
+            elif action == "set_template":
                 tmpl_key = admin_sess["tmpl_key"]
                 # Validate template safely
                 try:

@@ -44,6 +44,165 @@ async def _post_gemini(payload: dict, timeout: float = 12.0) -> Optional[dict]:
     return None
 
 
+async def trace_deal_details(
+    text: str,
+    existing_draft: Optional[Dict[str, Any]] = None,
+    chat_messages: Optional[list] = None,
+) -> Dict[str, Any]:
+    """Auto-traces and extracts deal details progressively from chat messages using Gemini AI or smart local NLP.
+    Accumulates fields into existing_draft so details mentioned across multiple messages are preserved without spam.
+    """
+    draft = dict(existing_draft or {})
+
+    # Try Gemini AI first if configured
+    if config.GEMINI_API_KEY:
+        try:
+            ai_res = await _call_gemini_tracer(text, draft, chat_messages)
+            if ai_res:
+                for k, v in ai_res.items():
+                    if v and str(v).strip() and str(v).lower() not in ("none", "n/a", "null"):
+                        draft[k] = v
+                _normalize_fields(draft)
+                return draft
+        except Exception as e:
+            log.warning("Gemini AI deal tracing failed, falling back to local tracer: %s", e)
+
+    # Local NLP tracing fallback
+    _trace_locally(text, draft)
+    _normalize_fields(draft)
+    return draft
+
+
+async def _call_gemini_tracer(
+    text: str,
+    existing_draft: dict,
+    chat_messages: list = None,
+) -> Optional[Dict[str, Any]]:
+    context = ""
+    if chat_messages:
+        context = "Recent chat messages:\n" + "\n".join(chat_messages[-8:]) + "\n\n"
+
+    prompt = (
+        "You are an AI escrow middleman assistant tracing deal details from a Telegram deal group chat.\n"
+        "Your task is to detect and extract deal parameters (what is being traded, price/amount, currency, payment method, turnaround time, conditions).\n\n"
+        f"Existing known deal details so far (JSON):\n{json.dumps(existing_draft, indent=2)}\n\n"
+        f"{context}"
+        f"Latest message from user:\n\"{text}\"\n\n"
+        "Extract any newly mentioned or updated deal details and return ONLY a valid JSON object matching this schema:\n"
+        "{\n"
+        '  "deal_type": "<item/account/service being traded, or null if unknown>",\n'
+        '  "amount": "<numeric amount like 500, 1500, or null if unknown>",\n'
+        '  "currency": "<INR, USD, USDT, BTC, ETH, SOL, TON, or null>",\n'
+        '  "payment_network": "<UPI, TRC-20, BEP-20, or null>",\n'
+        '  "tat": "<duration like 2h, 24h, 1d, or null>",\n'
+        '  "conditions": "<terms, rules or None>"\n'
+        "}\n"
+        "Rules:\n"
+        "- If a field was not mentioned or changed, keep the existing value or return null.\n"
+        "- Do NOT confuse follower counts (e.g. 50k followers) with deal price.\n"
+        "- Return ONLY the JSON object, nothing else."
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+
+    data = await _post_gemini(payload, timeout=10.0)
+    if data and "candidates" in data and data["candidates"]:
+        try:
+            raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as e:
+            log.warning("Could not parse JSON from Gemini tracer: %s", e)
+    return None
+
+
+def _trace_locally(text: str, draft: dict):
+    """Local deterministic NLP deal details tracer for progressive conversation messages."""
+    clean = text.strip()
+    if not clean:
+        return
+
+    # Check if this single message is a full format
+    full_parsed = _parse_locally(clean)
+    if full_parsed and full_parsed.get("deal_type") and full_parsed.get("amount"):
+        for k, v in full_parsed.items():
+            if v:
+                draft[k] = v
+        return
+
+    def repl(m):
+        after = clean[m.end():m.end() + 20].lower()
+        if re.match(r"^\s*(?:followers|subs|subscribers|members|likes|views|m\b)", after):
+            return m.group(0)
+        return str(int(float(m.group(1)) * 1000))
+
+    expanded_text = re.sub(r"\b(\d+(?:\.\d+)?)\s*[kK]\b", repl, clean)
+    lower = expanded_text.lower()
+
+    # 1. Amount & Currency
+    m_amt = re.search(r"\b(?:amount|amt|price|rate|cost|total|val)\s*[:=]?\s*(?:₹|\$)?\s*(\d+(?:\.\d+)?)\s*(?:(inr|rs|usd|usdt))?\b", expanded_text, re.I)
+    if not m_amt:
+        m_amt = re.search(r"(?:₹|\$)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:rs|inr|usd|usdt)\b", expanded_text, re.I)
+    if not m_amt:
+        m_amt = re.search(r"(?:deal\s*(?:at|for)?\s*|pay\s*)(\d+(?:\.\d+)?)", expanded_text, re.I)
+    if not m_amt:
+        # Bare number if message is concise: e.g. '1200 upi' or '1200'
+        m_amt = re.search(r"\b(\d{2,8}(?:\.\d+)?)\s*(?:upi|gpay|crypto)?\b", expanded_text, re.I)
+
+    if m_amt:
+        for g in m_amt.groups():
+            if g and re.match(r"^\d+(?:\.\d+)?$", g):
+                val = float(g)
+                if val > 0:
+                    draft["amount"] = str(int(val) if val.is_integer() else val)
+                    break
+        if any(k in lower for k in ("usdt", "crypto", "btc", "eth", "sol", "ton")):
+            draft["currency"] = "USDT"
+        elif any(k in lower for k in ("usd", "$")) and "usdt" not in lower:
+            draft["currency"] = "USD"
+        elif any(k in lower for k in ("inr", "₹", "rs", "rupee", "upi", "gpay", "phonepe")):
+            draft["currency"] = "INR"
+
+    # 2. Payment Network
+    if any(k in lower for k in ("trc20", "trc-20")):
+        draft["payment_network"] = "TRC-20"
+        draft.setdefault("currency", "USDT")
+    elif any(k in lower for k in ("bep20", "bep-20")):
+        draft["payment_network"] = "BEP-20"
+        draft.setdefault("currency", "USDT")
+    elif any(k in lower for k in ("upi", "gpay", "paytm", "phonepe")):
+        draft["payment_network"] = "UPI"
+        draft.setdefault("currency", "INR")
+
+    # 3. TAT
+    m_tat = re.search(r"\b(?:tat|time|duration|within)?\s*[:=]?\s*(\d+\s*(?:m|min|mins|minutes|h|hr|hrs|hours|d|day|days))\b", expanded_text, re.I)
+    if m_tat:
+        draft["tat"] = m_tat.group(1).strip()
+
+    # 4. Conditions
+    m_cond = re.search(r"\b(?:cond|conditions|terms|tos|rules)\s*[:=]?\s*([^|\n]+)", expanded_text, re.I)
+    if m_cond:
+        draft["conditions"] = m_cond.group(1).strip()
+
+    # 5. Item / Deal Type
+    if not draft.get("deal_type"):
+        m_item = re.search(r"\b(?:item|product|account|type|selling|buying|trade|trading|deal\s+for)\s*[:=]?\s*([^|\n,]+)", expanded_text, re.I)
+        if m_item:
+            cand = m_item.group(1).strip()
+            for kw in ("amount", "price", "tat", "fee", "upi", "pay", "at", "for"):
+                cand = re.split(rf"\b{kw}\b", cand, flags=re.I)[0].strip()
+            if len(cand) >= 3 and not cand.isdigit():
+                draft["deal_type"] = cand
+        elif any(k in lower for k in ("account", "acc", "channel", "page", "handle", "group", "bot", "id", "pubg", "bgmi", "valo", "valorant", "insta", "instagram", "yt", "youtube", "domain", "script")):
+            cand = re.split(r"\b(?:price|amount|rate|cost|for|amt|upi|tat|at)\b", expanded_text, flags=re.I)[0].strip()
+            if len(cand) >= 3 and not cand.isdigit():
+                draft["deal_type"] = cand
+
+
 async def parse_deal_details(text: str) -> Optional[Dict[str, Any]]:
     """Attempts AI parsing if GEMINI_API_KEY is configured; falls back to deterministic NLP parser."""
     if config.GEMINI_API_KEY:

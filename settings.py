@@ -3,7 +3,8 @@ Stored in MongoDB 'settings' collection and cached in-memory for instant access.
 All values and templates can be edited, previewed, and reset by the middleman via /settings.
 """
 import logging
-from typing import Any, Dict
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import config
 import emojis
@@ -113,6 +114,102 @@ TEMPLATE_LABELS: Dict[str, str] = {
     "vouch": "Vouch Format Template",
 }
 
+DEFAULT_FEE_CHART_RAW = (
+    "200 to 900 deal amt fix mm fee - 35\n"
+    "901 to 1400 deal amt fix mm fee - 50\n"
+    "1401 to 2000 deal amt fix mm fee - 100\n"
+    "2000+ mm fee 4%"
+)
+
+
+def parse_fee_chart(text: str) -> List[Dict[str, Any]]:
+    """Parses custom tiered middleman fee charts into structured slabs."""
+    slabs = []
+    lines = [l.strip() for l in (text or "").strip().splitlines() if l.strip()]
+    for line in lines:
+        m_range = re.search(r"(\d+(?:\.\d+)?)\s*(?:to|-|–)\s*(\d+(?:\.\d+)?)", line, re.I)
+        m_plus = re.search(r"(\d+(?:\.\d+)?)\s*(?:\+|and above|above|plus|>)", line, re.I)
+
+        if m_range:
+            low = float(m_range.group(1))
+            high = float(m_range.group(2))
+            rest = line[m_range.end():].strip()
+        elif m_plus:
+            low = float(m_plus.group(1))
+            high = None
+            rest = line[m_plus.end():].strip()
+        else:
+            continue
+
+        m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", rest)
+        if m_pct:
+            fee_str = f"{m_pct.group(1)}%"
+            fee_type = "percent"
+        else:
+            nums = re.findall(r"(\d+(?:\.\d+)?)", rest)
+            if nums:
+                fee_str = nums[-1]
+                fee_type = "fixed"
+            else:
+                continue
+
+        slabs.append({
+            "min": low,
+            "max": high,
+            "fee": fee_str,
+            "type": fee_type,
+            "raw": line,
+        })
+    return slabs
+
+
+def format_fee_chart(slabs: List[Dict[str, Any]], currency: str = "INR") -> str:
+    """Formats fee slabs into clean bullet points for display."""
+    if not slabs:
+        return "<i>No fee chart configured (using standard default fee).</i>"
+    lines = []
+    sym = get_currency_symbol(currency)
+    curr_label = sym if sym in ("₹", "$", "€", "£") else currency
+    for s in slabs:
+        low = int(s["min"]) if s["min"].is_integer() else s["min"]
+        high = s.get("max")
+        fee = s["fee"]
+        is_pct = "%" in fee or s.get("type") == "percent"
+
+        if is_pct:
+            fee_label = fee
+        else:
+            fee_label = f"{fee} {currency}".strip() if curr_label == currency else f"{curr_label}{fee}"
+
+        if high is not None:
+            high_val = int(high) if high.is_integer() else high
+            lines.append(f"• <b>{low} to {high_val}</b>: <code>{fee_label}</code>")
+        else:
+            lines.append(f"• <b>{low}+</b>: <code>{fee_label}</code>")
+    return "\n".join(lines)
+
+
+def get_chart_fee_for_amount(amount_val: float, slabs: List[Dict[str, Any]]) -> Optional[str]:
+    """Finds matching slab fee for the given amount.
+    Applies the lowest slab if amount is below minimum slab.
+    """
+    if not slabs:
+        return None
+    sorted_slabs = sorted(slabs, key=lambda s: s["min"])
+    if amount_val < sorted_slabs[0]["min"]:
+        return sorted_slabs[0]["fee"]
+    for s in sorted_slabs:
+        s_min = s["min"]
+        s_max = s.get("max")
+        if s_max is not None:
+            if s_min <= amount_val <= s_max:
+                return s["fee"]
+        else:
+            if amount_val >= s_min:
+                return s["fee"]
+    return None
+
+
 # In-memory cache
 _cache: Dict[str, Any] = {}
 
@@ -125,6 +222,10 @@ def _get_defaults() -> Dict[str, Any]:
         "upi_id": config.DEFAULT_UPI_ID,
         "upi_name": f"{config.MM_USERNAME} Escrow",
         "default_fee": config.DEFAULT_MM_FEE,
+        "fsm_mode": True,
+        "fee_chart_enabled": True,
+        "fee_chart_slabs": parse_fee_chart(DEFAULT_FEE_CHART_RAW),
+        "fee_chart_raw": DEFAULT_FEE_CHART_RAW,
         "gc_name_template": GC_NAME_PRESETS[0],
         "gc_photo_file_id": None,
         "gc_start_num": None,

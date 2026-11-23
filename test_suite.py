@@ -465,6 +465,108 @@ def run_tests():
     assert "7072573379" not in render_name_test(u_none)
     print("✓ Leaderboard privacy verified: shows @username or name, never raw UID.")
 
+    # 20. Tiered Fee Chart (Slabs) Parsing & Calculations
+    print("\n--- 20. Testing Tiered Fee Chart (Slabs) Parsing & Calculations ---")
+    custom_chart_text = (
+        "200 to 900 deal amt fix mm fee - 35\n"
+        "901 to 1400 deal amt fix mm fee - 50\n"
+        "1401 to 2000 deal amt fix mm fee - 100\n"
+        "2000+ mm fee 4%"
+    )
+    slabs = settings.parse_fee_chart(custom_chart_text)
+    assert len(slabs) == 4, f"Expected 4 slabs, got {len(slabs)}"
+    assert slabs[0]["min"] == 200.0 and slabs[0]["max"] == 900.0 and slabs[0]["fee"] == "35"
+    assert slabs[1]["min"] == 901.0 and slabs[1]["max"] == 1400.0 and slabs[1]["fee"] == "50"
+    assert slabs[2]["min"] == 1401.0 and slabs[2]["max"] == 2000.0 and slabs[2]["fee"] == "100"
+    assert slabs[3]["min"] == 2000.0 and slabs[3]["max"] is None and slabs[3]["fee"] == "4%"
+
+    # Test fee lookup across slabs
+    assert settings.get_chart_fee_for_amount(150, slabs) == "35"  # under min slab
+    assert settings.get_chart_fee_for_amount(500, slabs) == "35"
+    assert settings.get_chart_fee_for_amount(900, slabs) == "35"
+    assert settings.get_chart_fee_for_amount(950, slabs) == "50"
+    assert settings.get_chart_fee_for_amount(1400, slabs) == "50"
+    assert settings.get_chart_fee_for_amount(1500, slabs) == "100"
+    assert settings.get_chart_fee_for_amount(2000, slabs) == "100"
+    assert settings.get_chart_fee_for_amount(2500, slabs) == "4%"
+    assert settings.get_chart_fee_for_amount(10000, slabs) == "4%"
+
+    # Test fee calculations with texts.calculate_fee_details
+    fee_val, fee_disp, tot_val, tot_disp = texts.calculate_fee_details("500", "35", "INR")
+    assert fee_val == 35 and tot_val == 535
+    assert "₹535" in tot_disp or "535" in tot_disp
+
+    fee_val, fee_disp, tot_val, tot_disp = texts.calculate_fee_details("1200", "50", "INR")
+    assert fee_val == 50 and tot_val == 1250
+
+    fee_val, fee_disp, tot_val, tot_disp = texts.calculate_fee_details("1800", "100", "INR")
+    assert fee_val == 100 and tot_val == 1900
+
+    fee_val, fee_disp, tot_val, tot_disp = texts.calculate_fee_details("2500", "4%", "INR")
+    assert fee_val == 100 and tot_val == 2600
+
+    print("✓ Custom tiered fee chart parsed and fee calculations verified.")
+
+    # 21. AI Deal Details Progressive Auto-Tracer
+    print("\n--- 21. Testing AI Deal Details Auto-Tracer ---")
+    draft = {}
+    draft = asyncio.run(ai_parser.trace_deal_details("selling valorant kuronami vandal account", existing_draft=draft))
+    assert draft.get("deal_type") is not None
+    is_valid, missing = ai_parser.validate_parsed_deal(draft)
+    assert not is_valid and "Amount" in missing
+
+    draft = asyncio.run(ai_parser.trace_deal_details("deal at 1500 upi tat 2h", existing_draft=draft))
+    assert draft.get("amount") == "1500"
+    assert draft.get("currency") == "INR"
+    assert draft.get("payment_network") == "UPI"
+    assert draft.get("tat") == "2h"
+    is_valid, missing = ai_parser.validate_parsed_deal(draft)
+    assert is_valid, f"Expected valid deal, missing: {missing}"
+    print("✓ Progressive multi-message deal details auto-tracing verified.")
+
+    # 22. /edeal & /editdeal Aliases
+    print("\n--- 22. Testing /edeal and /editdeal Aliases ---")
+    import handlers
+    assert hasattr(handlers, "edeal_cmd")
+    assert hasattr(handlers, "editdeal_cmd")
+    assert handlers.edeal_cmd == handlers.editdeal_cmd
+
+    edits = asyncio.run(ai_parser.parse_deal_edits("amount 2500 upi"))
+    assert edits.get("amount") == "2500"
+    assert edits.get("payment_network") == "UPI"
+    print("✓ /edeal and /editdeal aliases and natural language edits verified.")
+
+    # 23. Bot Menu Scopes (Hide MM and GC Commands from Normal Users)
+    print("\n--- 23. Testing Bot Menu Scopes (Hiding MM Commands) ---")
+    import main
+    mm_cmd_names = {
+        "settings", "stats", "ad", "bd", "dlt", "settat", "begin",
+        "extendtat", "hold", "unhold", "release", "close", "ai",
+        "editdeal", "edeal", "editamt",
+    }
+    user_p_names = {c.command for c in main.USER_PRIVATE_COMMANDS}
+    user_g_names = {c.command for c in main.USER_GROUP_COMMANDS}
+
+    # Verify NO MM command appears in normal user private or group scopes
+    assert not (user_p_names & mm_cmd_names), f"MM commands found in user private menu: {user_p_names & mm_cmd_names}"
+    assert not (user_g_names & mm_cmd_names), f"MM commands found in user group menu: {user_g_names & mm_cmd_names}"
+
+    # Verify admin and MM private scopes DO have management commands
+    admin_g_names = {c.command for c in main.ADMIN_GROUP_COMMANDS}
+    mm_p_names = {c.command for c in main.MM_PRIVATE_COMMANDS}
+    assert "editdeal" in admin_g_names and "edeal" in admin_g_names
+    assert "settings" in mm_p_names and "stats" in mm_p_names
+    print("✓ Bot menu scopes verified: MM commands cleanly hidden from normal users.")
+
+    # 24. FSM Mode & Less Spammy Deal Prompt
+    print("\n--- 24. Testing FSM Mode & Less Spammy Deal Prompt ---")
+    assert settings.get("fsm_mode") is True
+    prompt = texts.instant_deal_details_prompt()
+    assert "Incomplete Deal Form" not in prompt
+    assert "AI is active" in prompt
+    assert "/edeal" in prompt
+    print("✓ FSM mode (no spam) and clean deal prompt verified.")
+
     print("\n===================================")
     print("🎉 ALL TEST SUITE ASSERTIONS PASSED!")
     print("===================================")
